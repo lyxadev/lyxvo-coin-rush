@@ -12,23 +12,33 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   export:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Godot 4.2 (headless)
+      - name: Install Godot 4.2 and export templates
+        timeout-minutes: 10
         run: |
-          curl -fsSL -o godot.zip https://github.com/godotengine/godot/releases/download/4.2-stable/Godot_v4.2-stable_linux.x86_64.zip
-          unzip -q godot.zip
-          sudo mv Godot_v4.2-stable_linux.x86_64 /usr/local/bin/godot
-          curl -fsSL -o templates.tpz https://github.com/godotengine/godot/releases/download/4.2-stable/Godot_v4.2-stable_export_templates.tpz
-          mkdir -p ~/.local/share/godot/export_templates/4.2.stable
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-all-errors --max-time 300 -o godot.zip \
+            https://github.com/godotengine/godot/releases/download/4.2-stable/Godot_v4.2-stable_linux.x86_64.zip
+          unzip -q -o godot.zip
+          sudo mv -f Godot_v4.2-stable_linux.x86_64 /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          curl -fsSL --retry 3 --retry-all-errors --max-time 600 -o templates.tpz \
+            https://github.com/godotengine/godot/releases/download/4.2-stable/Godot_v4.2-stable_export_templates.tpz
+          rm -rf tpl && mkdir tpl
           unzip -q templates.tpz -d tpl
-          mv tpl/templates/* ~/.local/share/godot/export_templates/4.2.stable/
+          TDIR="$HOME/.local/share/godot/export_templates/4.2.stable"
+          mkdir -p "$TDIR"
+          cp -r tpl/templates/. "$TDIR/"
+          test -f "$TDIR/web_nothreads_release.zip"
+          godot --version
 
       - name: Write export preset
         run: |
@@ -38,10 +48,16 @@ jobs:
           name="Web"
           platform="Web"
           runnable=true
-          export_path="export/web/index.html"
+          dedicated_server=false
+          custom_features=""
           export_filter="all_resources"
           include_filter=""
           exclude_filter=""
+          export_path="export/web/index.html"
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
 
           [preset.0.options]
 
@@ -49,17 +65,33 @@ jobs:
           custom_template/release=""
           variant/extensions_support=false
           vram_texture_compression/for_desktop=true
+          vram_texture_compression/for_mobile=false
           html/export_icon=true
           html/custom_html_shell=""
           html/head_include=""
           html/canvas_resize_policy=2
           html/focus_canvas_on_start=true
+          html/experimental_virtual_keyboard=false
+          progressive_web_app/enabled=false
           EOF
 
-      - name: Import & export
+      - name: Import project resources
+        timeout-minutes: 8
         run: |
-          godot --headless --import || true
-          godot --headless --export-release "Web" export/web/index.html
+          set -o pipefail
+          timeout 420 godot --headless --editor --quit 2>&1 | tail -n 40
+          test -d .godot/imported && echo "Imported OK"
+
+      - name: Export Web build
+        timeout-minutes: 8
+        run: |
+          set -o pipefail
+          mkdir -p export/web
+          timeout 420 godot --headless --export-release "Web" export/web/index.html 2>&1 | tail -n 60
+          test -f export/web/index.html
+          test -f export/web/index.wasm
+          test -f export/web/index.pck
+          ls -lh export/web
 
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -68,6 +100,7 @@ jobs:
   deploy:
     needs: export
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
